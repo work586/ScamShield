@@ -3,8 +3,11 @@ import axios from 'axios';
 import { Line, Bar, Doughnut } from 'react-chartjs-2';
 import 'chart.js/auto';
 import './App.css';
+
 const API_BASE_URL =
-  process.env.REACT_APP_API_BASE_URL || "http://127.0.0.1:8000";
+  process.env.REACT_APP_API_BASE_URL ||
+  "https://scamshield-api-lzmj.onrender.com";
+
 function App() {
   const [page, setPage] = useState('home');
   const [view, setView] = useState('overview'); // 'overview' | 'analytics'
