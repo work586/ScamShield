@@ -3,6 +3,8 @@ import json
 import re
 import threading
 import subprocess
+import tempfile
+import imageio_ffmpeg
 
 from django.shortcuts import render
 from django.http import JsonResponse
@@ -97,36 +99,117 @@ def analyze_text(request):
 # ==========================================
 # 2. MANUAL VOICE ANALYSIS
 # ==========================================
+
 @csrf_exempt
 @api_view(['POST'])
 def analyze_voice(request):
+    input_path = None
+    wav_path = None
+
     try:
         audio_file = request.FILES.get('audio')
+
         if not audio_file:
-            return JsonResponse({"error": "No audio file uploaded"}, status=400)
-        temp_path = "temp_audio.wav"
-        with open(temp_path, 'wb+') as destination:
+            return JsonResponse(
+                {"error": "No audio file uploaded"},
+                status=400
+            )
+
+        # Save the original upload to a temporary file.
+        suffix = os.path.splitext(audio_file.name or "")[1]
+        suffix = suffix if suffix else ".audio"
+
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix, delete=False
+        ) as source:
+            input_path = source.name
+
             for chunk in audio_file.chunks():
-                destination.write(chunk)
-                
-        result = ai.analyze_voice_call(temp_path)
-        
+                source.write(chunk)
+
+        # Create a separate temporary WAV output file.
+        with tempfile.NamedTemporaryFile(
+            suffix=".wav", delete=False
+        ) as output:
+            wav_path = output.name
+
+        # Convert OGG/MP3/M4A/WebM and other FFmpeg-supported
+        # input formats into PCM WAV for speech recognition.
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+
+        conversion = subprocess.run(
+            [
+                ffmpeg_path,
+                "-y",
+                "-i", input_path,
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ac", "1",
+                "-ar", "16000",
+                "-f", "wav",
+                wav_path,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+
+        if conversion.returncode != 0:
+            print(
+                "Audio conversion failed:",
+                conversion.stderr.decode(
+                    "utf-8", errors="replace"
+                )[-2000:]
+            )
+            return JsonResponse(
+                {
+                    "error": (
+                        "Could not convert the uploaded audio. "
+                        "Please upload a valid audio recording."
+                    )
+                },
+                status=400
+            )
+
+        # Analyze the converted WAV using your existing AI engine.
+        result = ai.analyze_voice_call(wav_path)
+
         if 'error' not in result:
             ScanHistory.objects.create(
-                text="[VOICE CALL]", 
-                score=result.get('score', 0), category=result.get('category', 'safe'), 
-                channel='voice', triggers=result.get('triggers', []),
+                text="[VOICE CALL]",
+                score=result.get('score', 0),
+                category=result.get('category', 'safe'),
+                channel='voice',
+                triggers=result.get('triggers', []),
                 language=result.get('language', 'english'),
-                transcript=result.get('transcript', ''), sender='Manual Voice Upload'
+                transcript=result.get('transcript', ''),
+                sender='Manual Voice Upload'
             )
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        return JsonResponse(result, status=200)
-    except Exception as e:
-        if 'temp_audio.wav' in str(e) and os.path.exists("temp_audio.wav"):
-            os.remove("temp_audio.wav")
-        return JsonResponse({"error": str(e)}, status=500)
 
+        return JsonResponse(result, status=200)
+
+    except subprocess.TimeoutExpired:
+        return JsonResponse(
+            {"error": "Audio conversion timed out. Try a shorter recording."},
+            status=408
+        )
+
+    except Exception as e:
+        print("Voice analysis error:", str(e))
+        return JsonResponse(
+            {"error": "Voice analysis failed. Please try another recording."},
+            status=500
+        )
+
+    finally:
+        # Remove temporary files even if analysis fails.
+        for path in (input_path, wav_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as cleanup_error:
+                    print("Temporary file cleanup failed:", cleanup_error)
 
 # ==========================================
 # 3. GET HISTORY
